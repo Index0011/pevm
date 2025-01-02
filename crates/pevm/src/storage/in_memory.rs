@@ -1,35 +1,34 @@
 use std::fmt::Debug;
-use std::sync::Arc;
 
 use alloy_primitives::{keccak256, Address, B256, U256};
 
 use super::{BlockHashes, Bytecodes, ChainState, EvmCode};
-use crate::{AccountBasic, Storage};
+use crate::{AccountBasic, EvmAccount, Storage};
 
 /// A storage that stores chain data in memory.
-#[derive(Debug, Clone, Default)]
-pub struct InMemoryStorage {
+#[derive(Debug, Default, Clone)]
+pub struct InMemoryStorage<'a> {
     accounts: ChainState,
-    bytecodes: Arc<Bytecodes>,
-    block_hashes: Arc<BlockHashes>,
+    bytecodes: Option<&'a Bytecodes>,
+    block_hashes: BlockHashes,
 }
 
-impl InMemoryStorage {
+impl<'a> InMemoryStorage<'a> {
     /// Construct a new [`InMemoryStorage`]
-    pub const fn new(
-        accounts: ChainState,
-        bytecodes: Arc<Bytecodes>,
-        block_hashes: Arc<BlockHashes>,
+    pub fn new(
+        accounts: impl IntoIterator<Item = (Address, EvmAccount)>,
+        bytecodes: Option<&'a Bytecodes>,
+        block_hashes: impl IntoIterator<Item = (u64, B256)>,
     ) -> Self {
-        Self {
-            accounts,
+        InMemoryStorage {
+            accounts: accounts.into_iter().collect(),
             bytecodes,
-            block_hashes,
+            block_hashes: block_hashes.into_iter().collect(),
         }
     }
 }
 
-impl Storage for InMemoryStorage {
+impl Storage for InMemoryStorage<'_> {
     // TODO: More proper error handling
     type Error = u8;
 
@@ -48,7 +47,10 @@ impl Storage for InMemoryStorage {
     }
 
     fn code_by_hash(&self, code_hash: &B256) -> Result<Option<EvmCode>, Self::Error> {
-        Ok(self.bytecodes.get(code_hash).cloned())
+        Ok(match self.bytecodes {
+            Some(bytecodes) => bytecodes.get(code_hash).cloned(),
+            None => None,
+        })
     }
 
     fn has_storage(&self, address: &Address) -> Result<bool, Self::Error> {

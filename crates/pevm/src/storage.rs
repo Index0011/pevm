@@ -1,5 +1,4 @@
 use std::{fmt::Display, sync::Arc};
-
 use alloy_primitives::{Address, Bytes, B256, U256};
 use bitvec::vec::BitVec;
 use hashbrown::HashMap;
@@ -31,10 +30,14 @@ pub struct EvmAccount {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code_hash: Option<B256>,
     /// The account's optional code.
+#[serde(rename = "evm_code")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<EvmCode>,
     /// The account's storage.
     pub storage: HashMap<U256, U256, FxBuildHasher>,
+#[serde(rename = "code")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub raw_code: Option<String>,
 }
 
 impl From<Account> for EvmAccount {
@@ -45,7 +48,8 @@ impl From<Account> for EvmAccount {
             nonce: account.info.nonce,
             code_hash: has_code.then_some(account.info.code_hash),
             code: has_code.then(|| account.info.code.unwrap().into()),
-            storage: account
+	    raw_code: None,
+	    storage: account
                 .storage
                 .into_iter()
                 .map(|(k, v)| (k, v.present_value))

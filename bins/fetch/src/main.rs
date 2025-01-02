@@ -3,7 +3,7 @@ use std::{
     collections::BTreeMap,
     error::Error,
     fs::{self, File},
-    io::BufReader,
+    io::{BufReader, Write},
     num::NonZeroUsize,
 };
 
@@ -15,7 +15,7 @@ use clap::Parser;
 use flate2::{bufread::GzDecoder, write::GzEncoder, Compression};
 use pevm::{
     chain::{PevmChain, PevmEthereum},
-    EvmAccount, EvmCode, Pevm, RpcStorage,
+    EvmAccount, EvmCode, Pevm, RpcStorage, Storage
 };
 use reqwest::Url;
 
@@ -57,7 +57,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     // Execute the block and track the pre-state in the RPC storage.
     Pevm::default()
-        .execute(&chain, &storage, &block, NonZeroUsize::MIN, true)
+        .execute(&storage, &chain, &block, NonZeroUsize::MIN, true)
         .map_err(|err| format!("Failed to execute block: {:?}", err))?;
 
     let block_dir = format!("data/blocks/{}", block.header.number);
@@ -73,54 +73,51 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|err| format!("Failed to write block to file: {err}"))?;
 
     // Populate bytecodes and state from RPC storage.
+    let mut state = BTreeMap::<Address, EvmAccount>::new();
     // TODO: Deduplicate logic with [for_each_block_from_disk] when there is more usage
-    let mut bytecodes: BTreeMap<B256, EvmCode> = match File::open("data/bytecodes.bincode.gz") {
+    /*let mut bytecodes: BTreeMap<B256, EvmCode> = match File::open("data/bytecodes.bincode.gz") {
         Ok(compressed_file) => {
             bincode::deserialize_from(GzDecoder::new(BufReader::new(compressed_file)))
                 .map_err(|err| format!("Failed to deserialize bytecodes from file: {err}"))?
         }
         Err(_) => BTreeMap::new(),
     };
-    bytecodes.extend(storage.get_cache_bytecodes());
-
-    let mut state = BTreeMap::<Address, EvmAccount>::new();
+    bytecodes.extend(storage.get_cache_bytecodes());*/
     for (address, mut account) in storage.get_cache_accounts() {
-        if let Some(code) = account.code.take() {
+        /*if let Some(code) = account.code.clone() {
             let code_hash = account
                 .code_hash
                 .ok_or(format!("Failed to get code hash for: {}", address))?;
             assert_ne!(code_hash, KECCAK_EMPTY);
-            bytecodes.insert(code_hash, code);
-        }
+            //bytecodes.insert(code_hash.clone(), code);
+	    account.code = storage.code_by_hash(&code_hash)?;
+        }*/
         state.insert(address, account);
     }
 
     // Write compressed bytecodes to disk.
-    let writer_bytecodes = File::create("data/bytecodes.bincode.gz")
-        .map(|f| GzEncoder::new(f, Compression::default()))
+    /*let file_bytecodes = File::create("data/bytecodes.bincode.gz")
         .map_err(|err| format!("Failed to create compressed bytecodes file: {err}"))?;
-    bincode::serialize_into(writer_bytecodes, &bytecodes)
-        .map_err(|err| format!("Failed to write bytecodes to file: {err}"))?;
+    let serialized_bytecodes = bincode::serialize(&bytecodes)
+        .map_err(|err| format!("Failed to serialize bytecodes to bincode: {err}"))?;
+    GzEncoder::new(file_bytecodes, Compression::default())
+        .write_all(&serialized_bytecodes)
+        .map_err(|err| format!("Failed to write bytecodes to file: {err}"))?;*/
 
     // Write pre-state to disk.
     let file_state = File::create(format!("{block_dir}/pre_state.json"))
         .map_err(|err| format!("Failed to create pre-state file: {err}"))?;
-    serde_json::to_writer(file_state, &state)
+    let json_state = serde_json::to_value(&state)
+        .map_err(|err| format!("Failed to serialize pre-state to JSON: {err}"))?;
+    serde_json::to_writer(file_state, &json_state)
         .map_err(|err| format!("Failed to write pre-state to file: {err}"))?;
 
-    // TODO: Deduplicate logic with [for_each_block_from_disk] when there is more usage
-    let mut block_hashes = match File::open("data/block_hashes.bincode") {
-        Ok(compressed_file) => bincode::deserialize_from::<_, BTreeMap<u64, B256>>(compressed_file)
-            .map_err(|err| format!("Failed to deserialize block hashes from file: {err}"))?,
-        Err(_) => BTreeMap::new(),
-    };
-    block_hashes.extend(storage.get_cache_block_hashes());
-
+    // Write block hashes to disk.
+    let block_hashes: BTreeMap<u64, B256> = storage.get_cache_block_hashes().into_iter().collect();
     if !block_hashes.is_empty() {
-        // Write compressed block hashes to disk
-        let file = File::create("data/block_hashes.bincode")
+        let file = File::create(format!("{block_dir}/block_hashes.json"))
             .map_err(|err| format!("Failed to create block hashes file: {err}"))?;
-        bincode::serialize_into(file, &block_hashes)
+        serde_json::to_writer(file, &block_hashes)
             .map_err(|err| format!("Failed to write block hashes to file: {err}"))?;
     }
 

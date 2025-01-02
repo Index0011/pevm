@@ -80,19 +80,21 @@ impl<N: Network> RpcStorage<N> {
     /// Send a request and retry many times if needed.
     /// This util is made to avoid error 429 Too Many Requests
     /// <https://en.wikipedia.org/wiki/Exponential_backoff>
-    async fn fetch<T, E, R: IntoFuture<Output = Result<T, E>>>(
+    async fn fetch<T, E: std::fmt::Debug, R: IntoFuture<Output = Result<T, E>>>(
         &self,
         request: impl Fn() -> R,
     ) -> Result<T, E> {
         const RETRY_LIMIT: usize = 8;
-        const INITIAL_DELAY_MILLIS: u64 = 125;
+        const INITIAL_DELAY_MILLIS: u64 = 20;
 
         let mut lives = RETRY_LIMIT;
         let mut delay = Duration::from_millis(INITIAL_DELAY_MILLIS);
-
-        loop {
+tokio::time::sleep(delay).await;        
+loop {
             let result = request().await;
             if lives > 0 && result.is_err() {
+            let error = result.as_ref().err().unwrap(); // 安全的解构错误
+            eprintln!("Error occurred: {:?}", error);
                 tokio::time::sleep(delay).await;
                 lives -= 1;
                 delay *= 2;
@@ -143,6 +145,12 @@ impl<N: Network> Storage for RpcStorage<N> {
         let nonce = nonce?;
         let balance = balance?;
         let code = code?;
+	let raw_code_bytes = code.clone();
+
+    let raw_code = Some(raw_code_bytes.iter()
+        .map(|byte| format!("{:02x}", byte)) // 转换每个字节为十六进制形式
+        .collect());
+
 
         // We need to distinguish new non-precompile accounts for gas calculation
         // in early hard-forks (creating new accounts cost extra gas, etc.).
@@ -174,6 +182,7 @@ impl<N: Network> Storage for RpcStorage<N> {
                 nonce,
                 code_hash,
                 code: None,
+		raw_code,
                 storage: HashMap::default(),
             },
         );

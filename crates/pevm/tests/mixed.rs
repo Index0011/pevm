@@ -1,10 +1,8 @@
 //! Test raw transfers -- A block with random raw transfers, ERC-20 transfers, and Uniswap swaps.
 
-use pevm::chain::PevmEthereum;
 use pevm::{Bytecodes, ChainState, EvmAccount, InMemoryStorage};
 use rand::random;
 use revm::primitives::{env::TxEnv, Address, TransactTo, U256};
-use std::sync::Arc;
 
 pub mod common;
 pub mod erc20;
@@ -60,8 +58,7 @@ fn mixed_block() {
         }
     }
     common::test_execute_revm(
-        &PevmEthereum::mainnet(),
-        InMemoryStorage::new(final_state, Arc::new(final_bytecodes), Default::default()),
+        InMemoryStorage::new(final_state, Some(&final_bytecodes), []),
         // TODO: Shuffle transactions to scatter dependencies around the block.
         // Note that we'll need to guarantee that the nonces are increasing.
         final_txs,

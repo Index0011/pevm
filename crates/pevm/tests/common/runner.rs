@@ -1,7 +1,7 @@
 use alloy_primitives::Bloom;
 use alloy_rpc_types_eth::Block;
 use pevm::{
-    chain::{CalculateReceiptRootError, PevmChain},
+    chain::{CalculateReceiptRootError, PevmChain, PevmEthereum},
     EvmAccount, Pevm, Storage,
 };
 use revm::primitives::{alloy_primitives::U160, Address, BlockEnv, SpecId, TxEnv, U256};
@@ -23,23 +23,19 @@ pub fn mock_account(idx: usize) -> (Address, EvmAccount) {
 
 /// Execute an REVM block sequentially and parallelly with PEVM and assert that
 /// the execution results match.
-pub fn test_execute_revm<C, S>(chain: &C, storage: S, txs: Vec<TxEnv>)
-where
-    C: PevmChain + PartialEq + Send + Sync,
-    S: Storage + Send + Sync,
-{
+pub fn test_execute_revm<S: Storage + Send + Sync>(storage: S, txs: Vec<TxEnv>) {
     let concurrency_level = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
     assert_eq!(
         pevm::execute_revm_sequential(
-            chain,
             &storage,
+            &PevmEthereum::mainnet(),
             SpecId::LATEST,
             BlockEnv::default(),
             txs.clone(),
         ),
         Pevm::default().execute_revm_parallel(
-            chain,
             &storage,
+            &PevmEthereum::mainnet(),
             SpecId::LATEST,
             BlockEnv::default(),
             txs,
@@ -50,19 +46,16 @@ where
 
 /// Execute an Alloy block sequentially & with pevm and assert that
 /// the execution results match.
-pub fn test_execute_alloy<C, S>(
-    chain: &C,
+pub fn test_execute_alloy<S: Storage + Send + Sync, C: PevmChain + Send + Sync + PartialEq>(
     storage: &S,
+    chain: &C,
     block: Block<C::Transaction>,
     must_match_block_header: bool,
-) where
-    C: PevmChain + PartialEq + Send + Sync,
-    S: Storage + Send + Sync,
-{
+) {
     let concurrency_level = thread::available_parallelism().unwrap_or(NonZeroUsize::MIN);
     let mut pevm = Pevm::default();
-    let sequential_result = pevm.execute(chain, storage, &block, concurrency_level, true);
-    let parallel_result = pevm.execute(chain, storage, &block, concurrency_level, false);
+    let sequential_result = pevm.execute(storage, chain, &block, concurrency_level, true);
+    let parallel_result = pevm.execute(storage, chain, &block, concurrency_level, false);
     assert!(sequential_result.is_ok());
     assert_eq!(&sequential_result, &parallel_result);
 
