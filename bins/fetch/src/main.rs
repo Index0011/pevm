@@ -15,7 +15,7 @@ use clap::Parser;
 use flate2::{bufread::GzDecoder, write::GzEncoder, Compression};
 use pevm::{
     chain::{PevmChain, PevmEthereum},
-    EvmAccount, EvmCode, Pevm, RpcStorage, Storage
+    EvmAccount, EvmCode, Pevm, RpcStorage, Storage, WriteSet
 };
 use reqwest::Url;
 
@@ -54,10 +54,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
     })?;
     let storage = RpcStorage::new(provider, spec_id, BlockId::number(block.header.number - 1));
-
+    let mut write_sets = BTreeMap::<i32, WriteSet>::new();
     // Execute the block and track the pre-state in the RPC storage.
     Pevm::default()
-        .execute(&storage, &chain, &block, NonZeroUsize::MIN, true)
+        .execute(&storage, &chain, &block, NonZeroUsize::MIN, true, &mut write_sets)
         .map_err(|err| format!("Failed to execute block: {:?}", err))?;
 
     let block_dir = format!("data/blocks/{}", block.header.number);
@@ -72,8 +72,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     serde_json::to_writer(block_file, &block)
         .map_err(|err| format!("Failed to write block to file: {err}"))?;
 
+    let wsets_file = File::create(format!("{block_dir}/wsets.json"))
+        .map_err(|err| format!("Failed to create wsets file: {err}"))?;
+    serde_json::to_writer(wsets_file, &write_sets)
+        .map_err(|err| format!("Failed to write block to file: {err}"))?;
+
     // Populate bytecodes and state from RPC storage.
     let mut state = BTreeMap::<Address, EvmAccount>::new();
+    
     // TODO: Deduplicate logic with [for_each_block_from_disk] when there is more usage
     /*let mut bytecodes: BTreeMap<B256, EvmCode> = match File::open("data/bytecodes.bincode.gz") {
         Ok(compressed_file) => {

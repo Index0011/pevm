@@ -9,6 +9,7 @@ use bitflags::bitflags;
 use hashbrown::HashMap;
 use rustc_hash::FxBuildHasher;
 use smallvec::SmallVec;
+use serde::Serialize;
 
 /// We use the last 8 bytes of an existing hash like address
 /// or code hash instead of rehashing it.
@@ -75,8 +76,8 @@ fn hash_determinisitic<T: Hash>(x: T) -> u64 {
 // TODO: It would be nice if we could tie the different cases of
 // memory locations & values at the type level, to prevent lots of
 // matches & potentially dangerous mismatch mistakes.
-#[derive(Debug, Clone)]
-enum MemoryValue {
+#[derive(Debug, Clone, Serialize)]
+pub enum MemoryValue {
     Basic(AccountBasic),
     CodeHash(B256),
     Storage(U256),
@@ -175,7 +176,7 @@ type ReadSet = HashMap<MemoryLocationHash, ReadOrigins, BuildIdentityHasher>;
 
 // The updates made by this transaction incarnation, which is applied
 // to the multi-version data structure at the end of execution.
-type WriteSet = Vec<(MemoryLocationHash, MemoryValue)>;
+pub type WriteSet = Vec<(MemoryLocationHash, MemoryValue)>;
 
 // A scheduled worker task
 // TODO: Add more useful work when there are idle workers like near
