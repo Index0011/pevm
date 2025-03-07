@@ -1,10 +1,3 @@
-use std::{
-    fmt::Debug,
-    num::NonZeroUsize,
-    sync::{mpsc, Mutex, OnceLock},
-    thread,
-};
-use std::collections::BTreeMap;
 use crate::storage::StorageWrapperError;
 use crate::AccountBasic;
 use alloy_primitives::{TxNonce, U256};
@@ -15,9 +8,15 @@ use revm::{
     primitives::{BlockEnv, SpecId, TxEnv},
     DatabaseCommit,
 };
+use std::collections::BTreeMap;
+use std::{
+    fmt::Debug,
+    num::NonZeroUsize,
+    sync::{mpsc, Mutex, OnceLock},
+    thread,
+};
 
 use crate::{
-    WriteSet,
     chain::PevmChain,
     compat::get_block_env,
     hash_determinisitic,
@@ -28,6 +27,7 @@ use crate::{
         build_evm, ExecutionError, PevmTxExecutionResult, Vm, VmExecutionError, VmExecutionResult,
     },
     EvmAccount, MemoryEntry, MemoryLocation, MemoryValue, Storage, Task, TxIdx, TxVersion,
+    WriteSet,
 };
 
 /// Errors when executing a block with pevm.
@@ -117,8 +117,11 @@ impl Pevm {
         block: &Block<C::Transaction>,
         concurrency_level: NonZeroUsize,
         force_sequential: bool,
-        write_sets: &mut BTreeMap::<i32, WriteSet>,
-    ) -> PevmResult<C> where <S as Storage>::Error: Debug {
+        write_sets: &mut BTreeMap<i32, WriteSet>,
+    ) -> PevmResult<C>
+    where
+        <S as Storage>::Error: Debug,
+    {
         let spec_id = chain
             .get_block_spec(&block.header)
             .map_err(PevmError::BlockSpecError)?;
@@ -152,7 +155,10 @@ impl Pevm {
     /// Execute an REVM block.
     // Ideally everyone would go through the [Alloy] interface. This one is currently
     // useful for testing, and for users that are heavily tied to Revm like Reth.
-    pub fn execute_revm_parallel<S: Storage + Send + Sync + std::fmt::Debug, C: PevmChain + Send + Sync>(
+    pub fn execute_revm_parallel<
+        S: Storage + Send + Sync + std::fmt::Debug,
+        C: PevmChain + Send + Sync,
+    >(
         &mut self,
         storage: &S,
         chain: &C,
@@ -160,7 +166,10 @@ impl Pevm {
         block_env: BlockEnv,
         txs: Vec<TxEnv>,
         concurrency_level: NonZeroUsize,
-    ) -> PevmResult<C> where <S as Storage>::Error: Debug {
+    ) -> PevmResult<C>
+    where
+        <S as Storage>::Error: Debug,
+    {
         if txs.is_empty() {
             return Ok(Vec::new());
         }
@@ -217,7 +226,14 @@ impl Pevm {
                 AbortReason::FallbackToSequential => {
                     self.dropper.drop((mv_memory, scheduler, Vec::new()));
                     let mut write_sets = BTreeMap::<i32, WriteSet>::new();
-                    return execute_revm_sequential(storage, chain, spec_id, block_env, txs, &mut write_sets);
+                    return execute_revm_sequential(
+                        storage,
+                        chain,
+                        spec_id,
+                        block_env,
+                        txs,
+                        &mut write_sets,
+                    );
                 }
                 AbortReason::ExecutionError(err) => {
                     self.dropper.drop((mv_memory, scheduler, txs));
@@ -348,7 +364,7 @@ impl Pevm {
                             nonce,
                             code_hash,
                             code: code.clone(),
-			    raw_code: None,
+                            raw_code: None,
                             storage: HashMap::default(),
                         });
                     }
@@ -432,8 +448,11 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
     spec_id: SpecId,
     block_env: BlockEnv,
     txs: Vec<TxEnv>,
-    write_sets: &mut BTreeMap::<i32, WriteSet>,
-) -> PevmResult<C> where <S as Storage>::Error: Debug {
+    write_sets: &mut BTreeMap<i32, WriteSet>,
+) -> PevmResult<C>
+where
+    <S as Storage>::Error: Debug,
+{
     let mut db = CacheDB::new(StorageWrapper(storage));
     let mut evm = build_evm(&mut db, chain, spec_id, block_env, None, true);
     let mut results = Vec::with_capacity(txs.len());
@@ -445,7 +464,7 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
         let to_hash = tx
             .transact_to
             .to()
-            .map(|to| hash_determinisitic(MemoryLocation::Basic(*to)));        
+            .map(|to| hash_determinisitic(MemoryLocation::Basic(*to)));
         match evm.transact() {
             Ok(result_and_state) => {
                 let mut write_set = WriteSet::with_capacity(3);
@@ -462,36 +481,33 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
                     if account.is_touched() {
                         let account_location_hash =
                             hash_determinisitic(MemoryLocation::Basic(*address));
-                        let account_basic_result = storage.basic(address).unwrap();
-                        let account_basic = account_basic_result.unwrap();
-                
+
+                        let account_basic = storage.basic(address).unwrap();
+
                         let code_hash_result = storage.code_hash(address).unwrap();
-                        let read_account = Some((account_basic, code_hash_result));
 
                         let has_code = !account.info.is_empty_code_hash();
-                        let is_new_code = has_code
-                            && read_account.clone().map_or(true, |(_, code_hash)| code_hash.is_none());
+                        let is_new_code = code_hash_result.is_some();
 
                         // Write new account changes
                         if is_new_code
-                            || read_account.is_none()
-                            || read_account.is_some_and(|(basic, _)| {
+                            || account_basic.is_none()
+                            || account_basic.is_some_and(|(basic)| {
                                 basic.nonce != account.info.nonce
                                     || basic.balance != account.info.balance
                             })
                         {
-                                //lazy mode
-                                if account_location_hash == from_hash {
-                                    write_set.push((
-                                        account_location_hash,
-                                        MemoryValue::LazySender(U256::MAX - account.info.balance),
-                                    ));
-                                } else if Some(account_location_hash) == to_hash {
-                                    write_set.push((
-                                        account_location_hash,
-                                        MemoryValue::LazyRecipient(tx.value),
-                                    ));
-
+                            //lazy mode
+                            if account_location_hash == from_hash {
+                                write_set.push((
+                                    account_location_hash,
+                                    MemoryValue::LazySender(U256::MAX - account.info.balance),
+                                ));
+                            } else if Some(account_location_hash) == to_hash {
+                                write_set.push((
+                                    account_location_hash,
+                                    MemoryValue::LazyRecipient(tx.value),
+                                ));
                             }
                             // We don't register empty accounts after [SPURIOUS_DRAGON]
                             // as they are cleared. This can only happen via 2 ways:
@@ -501,9 +517,7 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
                             // and return a [None], i.e., [LoadedAsNotExisting]. Without
                             // this check it would write then read a [Some] default
                             // account, which may yield a wrong gas fee, etc.
-                            else if !chain.is_eip_161_enabled(spec_id)
-                                || !account.is_empty()
-                            {
+                            else if !chain.is_eip_161_enabled(spec_id) || !account.is_empty() {
                                 write_set.push((
                                     account_location_hash,
                                     MemoryValue::Basic(AccountBasic {
@@ -546,7 +560,6 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
             }
             Err(err) => return Err(PevmError::ExecutionError(err.to_string())),
         }
-
     }
     Ok(results)
 }
