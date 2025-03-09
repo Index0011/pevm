@@ -1,6 +1,6 @@
 use crate::storage::StorageWrapperError;
 use crate::AccountBasic;
-use alloy_primitives::{TxNonce, U256};
+use alloy_primitives::{Address, TxNonce, U256};
 use alloy_rpc_types_eth::{Block, BlockTransactions};
 use hashbrown::HashMap;
 use revm::{
@@ -117,7 +117,7 @@ impl Pevm {
         block: &Block<C::Transaction>,
         concurrency_level: NonZeroUsize,
         force_sequential: bool,
-        write_sets: &mut BTreeMap<i32, WriteSet>,
+        write_sets: &mut BTreeMap<Address, BTreeMap<U256, U256>>,
     ) -> PevmResult<C>
     where
         <S as Storage>::Error: Debug,
@@ -225,7 +225,8 @@ impl Pevm {
             match abort_reason {
                 AbortReason::FallbackToSequential => {
                     self.dropper.drop((mv_memory, scheduler, Vec::new()));
-                    let mut write_sets = BTreeMap::<i32, WriteSet>::new();
+                    let mut write_sets: BTreeMap<Address, BTreeMap<U256, U256>> =
+                        Default::default();
                     return execute_revm_sequential(
                         storage,
                         chain,
@@ -448,7 +449,7 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
     spec_id: SpecId,
     block_env: BlockEnv,
     txs: Vec<TxEnv>,
-    write_sets: &mut BTreeMap<i32, WriteSet>,
+    write_sets: &mut BTreeMap<Address, BTreeMap<U256, U256>>,
 ) -> PevmResult<C>
 where
     <S as Storage>::Error: Debug,
@@ -467,82 +468,15 @@ where
             .map(|to| hash_determinisitic(MemoryLocation::Basic(*to)));
         match evm.transact() {
             Ok(result_and_state) => {
-                let mut write_set = WriteSet::with_capacity(3);
                 for (address, account) in &result_and_state.state {
-                    if account.is_selfdestructed() {
-                        // TODO: Also write [SelfDestructed] to the basic location?
-                        // For now we are betting on [code_hash] triggering the sequential
-                        // fallback when we read a self-destructed contract.
-                        write_set.push((
-                            hash_determinisitic(MemoryLocation::CodeHash(*address)),
-                            MemoryValue::SelfDestructed,
-                        ));
-                    }
-                    if account.is_touched() {
-                        let account_location_hash =
-                            hash_determinisitic(MemoryLocation::Basic(*address));
-
-                        let account_basic = storage.basic(address).unwrap();
-
-                        let code_hash_result = storage.code_hash(address).unwrap();
-
-                        let has_code = !account.info.is_empty_code_hash();
-                        let is_new_code = code_hash_result.is_some();
-
-                        // Write new account changes
-                        if is_new_code
-                            || account_basic.is_none()
-                            || account_basic.is_some_and(|(basic)| {
-                                basic.nonce != account.info.nonce
-                                    || basic.balance != account.info.balance
-                            })
-                        {
-                            //lazy mode
-                            if account_location_hash == from_hash {
-                                write_set.push((
-                                    account_location_hash,
-                                    MemoryValue::LazySender(U256::MAX - account.info.balance),
-                                ));
-                            } else if Some(account_location_hash) == to_hash {
-                                write_set.push((
-                                    account_location_hash,
-                                    MemoryValue::LazyRecipient(tx.value),
-                                ));
-                            }
-                            // We don't register empty accounts after [SPURIOUS_DRAGON]
-                            // as they are cleared. This can only happen via 2 ways:
-                            // 1. Self-destruction which is handled by an if above.
-                            // 2. Sending 0 ETH to an empty account, which we treat as a
-                            // non-write here. A later read would trace back to storage
-                            // and return a [None], i.e., [LoadedAsNotExisting]. Without
-                            // this check it would write then read a [Some] default
-                            // account, which may yield a wrong gas fee, etc.
-                            else if !chain.is_eip_161_enabled(spec_id) || !account.is_empty() {
-                                write_set.push((
-                                    account_location_hash,
-                                    MemoryValue::Basic(AccountBasic {
-                                        balance: account.info.balance,
-                                        nonce: account.info.nonce,
-                                    }),
-                                ));
-                            }
-                        }
-
-                        // Write new contract
-                        if is_new_code {
-                            write_set.push((
-                                hash_determinisitic(MemoryLocation::CodeHash(*address)),
-                                MemoryValue::CodeHash(account.info.code_hash),
-                            ));
-                        }
-                    }
-
-                    // TODO: We should move this changed check to our read set like for account info?
+                    let mut storage_set: BTreeMap<U256, U256> = Default::default();
+                    let mut count = 0;
                     for (slot, value) in account.changed_storage_slots() {
-                        write_set.push((
-                            hash_determinisitic(MemoryLocation::Storage(*address, *slot)),
-                            MemoryValue::Storage(value.present_value),
-                        ));
+                        storage_set.insert(*slot, value.present_value);
+                        count = count + 1;
+                    }
+                    if (count > 0) {
+                        write_sets.insert(*address, storage_set);
                     }
                 }
                 evm.db_mut().commit(result_and_state.state.clone());
@@ -555,7 +489,6 @@ where
                 execution_result.receipt.cumulative_gas_used = cumulative_gas_used;
 
                 results.push(execution_result);
-                write_sets.insert(tx_idx, write_set);
                 tx_idx = tx_idx + 1;
             }
             Err(err) => return Err(PevmError::ExecutionError(err.to_string())),
