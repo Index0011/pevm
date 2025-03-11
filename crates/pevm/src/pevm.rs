@@ -1,16 +1,19 @@
-use std::{
-    fmt::Debug,
-    num::NonZeroUsize,
-    sync::{mpsc, Mutex, OnceLock},
-    thread,
-};
-use alloy_primitives::{TxNonce, U256};
+use crate::storage::StorageWrapperError;
+use crate::AccountBasic;
+use alloy_primitives::{Address, TxNonce, U256};
 use alloy_rpc_types_eth::{Block, BlockTransactions};
 use hashbrown::HashMap;
 use revm::{
     db::CacheDB,
     primitives::{BlockEnv, SpecId, TxEnv},
     DatabaseCommit,
+};
+use std::collections::BTreeMap;
+use std::{
+    fmt::Debug,
+    num::NonZeroUsize,
+    sync::{mpsc, Mutex, OnceLock},
+    thread,
 };
 
 use crate::{
@@ -24,6 +27,7 @@ use crate::{
         build_evm, ExecutionError, PevmTxExecutionResult, Vm, VmExecutionError, VmExecutionResult,
     },
     EvmAccount, MemoryEntry, MemoryLocation, MemoryValue, Storage, Task, TxIdx, TxVersion,
+    WriteSet,
 };
 
 /// Errors when executing a block with pevm.
@@ -100,7 +104,7 @@ pub struct Pevm {
 impl Pevm {
     /// Execute an Alloy block, which is becoming the "standard" format in Rust.
     /// TODO: Better error handling.
-    pub fn execute<S: Storage + Send + Sync, C: PevmChain + Send + Sync>(
+    pub fn execute<S: Storage + Send + Sync + Debug, C: PevmChain + Send + Sync>(
         &mut self,
         storage: &S,
         chain: &C,
@@ -113,7 +117,11 @@ impl Pevm {
         block: &Block<C::Transaction>,
         concurrency_level: NonZeroUsize,
         force_sequential: bool,
-    ) -> PevmResult<C> {
+        write_sets: &mut BTreeMap<Address, BTreeMap<U256, U256>>,
+    ) -> PevmResult<C>
+    where
+        <S as Storage>::Error: Debug,
+    {
         let spec_id = chain
             .get_block_spec(&block.header)
             .map_err(PevmError::BlockSpecError)?;
@@ -131,7 +139,7 @@ impl Pevm {
             || tx_envs.len() < concurrency_level.into()
             || block.header.gas_used < 4_000_000
         {
-            execute_revm_sequential(storage, chain, spec_id, block_env, tx_envs)
+            execute_revm_sequential(storage, chain, spec_id, block_env, tx_envs, write_sets)
         } else {
             self.execute_revm_parallel(
                 storage,
@@ -147,7 +155,10 @@ impl Pevm {
     /// Execute an REVM block.
     // Ideally everyone would go through the [Alloy] interface. This one is currently
     // useful for testing, and for users that are heavily tied to Revm like Reth.
-    pub fn execute_revm_parallel<S: Storage + Send + Sync, C: PevmChain + Send + Sync>(
+    pub fn execute_revm_parallel<
+        S: Storage + Send + Sync + std::fmt::Debug,
+        C: PevmChain + Send + Sync,
+    >(
         &mut self,
         storage: &S,
         chain: &C,
@@ -155,7 +166,10 @@ impl Pevm {
         block_env: BlockEnv,
         txs: Vec<TxEnv>,
         concurrency_level: NonZeroUsize,
-    ) -> PevmResult<C> {
+    ) -> PevmResult<C>
+    where
+        <S as Storage>::Error: Debug,
+    {
         if txs.is_empty() {
             return Ok(Vec::new());
         }
@@ -211,7 +225,16 @@ impl Pevm {
             match abort_reason {
                 AbortReason::FallbackToSequential => {
                     self.dropper.drop((mv_memory, scheduler, Vec::new()));
-                    return execute_revm_sequential(storage, chain, spec_id, block_env, txs);
+                    let mut write_sets: BTreeMap<Address, BTreeMap<U256, U256>> =
+                        Default::default();
+                    return execute_revm_sequential(
+                        storage,
+                        chain,
+                        spec_id,
+                        block_env,
+                        txs,
+                        &mut write_sets,
+                    );
                 }
                 AbortReason::ExecutionError(err) => {
                     self.dropper.drop((mv_memory, scheduler, txs));
@@ -342,7 +365,7 @@ impl Pevm {
                             nonce,
                             code_hash,
                             code: code.clone(),
-			    raw_code: None,
+                            raw_code: None,
                             storage: HashMap::default(),
                         });
                     }
@@ -426,15 +449,36 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
     spec_id: SpecId,
     block_env: BlockEnv,
     txs: Vec<TxEnv>,
-) -> PevmResult<C> {
+    write_sets: &mut BTreeMap<Address, BTreeMap<U256, U256>>,
+) -> PevmResult<C>
+where
+    <S as Storage>::Error: Debug,
+{
     let mut db = CacheDB::new(StorageWrapper(storage));
     let mut evm = build_evm(&mut db, chain, spec_id, block_env, None, true);
     let mut results = Vec::with_capacity(txs.len());
     let mut cumulative_gas_used: u128 = 0;
+    let mut tx_idx: i32 = 0;
     for tx in txs {
-        *evm.tx_mut() = tx;
+        *evm.tx_mut() = tx.clone();
+        let from_hash = hash_determinisitic(MemoryLocation::Basic(tx.caller));
+        let to_hash = tx
+            .transact_to
+            .to()
+            .map(|to| hash_determinisitic(MemoryLocation::Basic(*to)));
         match evm.transact() {
             Ok(result_and_state) => {
+                for (address, account) in &result_and_state.state {
+                    let mut storage_set: BTreeMap<U256, U256> = Default::default();
+                    let mut count = 0;
+                    for (slot, value) in account.changed_storage_slots() {
+                        storage_set.insert(*slot, value.present_value);
+                        count = count + 1;
+                    }
+                    if (count > 0) {
+                        write_sets.insert(*address, storage_set);
+                    }
+                }
                 evm.db_mut().commit(result_and_state.state.clone());
 
                 let mut execution_result =
@@ -445,6 +489,7 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
                 execution_result.receipt.cumulative_gas_used = cumulative_gas_used;
 
                 results.push(execution_result);
+                tx_idx = tx_idx + 1;
             }
             Err(err) => return Err(PevmError::ExecutionError(err.to_string())),
         }
