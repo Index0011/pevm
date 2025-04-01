@@ -117,7 +117,7 @@ impl Pevm {
         block: &Block<C::Transaction>,
         concurrency_level: NonZeroUsize,
         force_sequential: bool,
-        write_sets: &mut BTreeMap<Address, BTreeMap<U256, U256>>,
+        write_sets: &mut BTreeMap<i32, BTreeMap<Address, BTreeMap<U256, U256>>>,
     ) -> PevmResult<C>
     where
         <S as Storage>::Error: Debug,
@@ -225,7 +225,7 @@ impl Pevm {
             match abort_reason {
                 AbortReason::FallbackToSequential => {
                     self.dropper.drop((mv_memory, scheduler, Vec::new()));
-                    let mut write_sets: BTreeMap<Address, BTreeMap<U256, U256>> =
+                    let mut write_sets: BTreeMap<i32, BTreeMap<Address, BTreeMap<U256, U256>>> =
                         Default::default();
                     return execute_revm_sequential(
                         storage,
@@ -449,7 +449,7 @@ pub fn execute_revm_sequential<S: Storage, C: PevmChain>(
     spec_id: SpecId,
     block_env: BlockEnv,
     txs: Vec<TxEnv>,
-    write_sets: &mut BTreeMap<Address, BTreeMap<U256, U256>>,
+    write_sets: &mut BTreeMap<i32, BTreeMap<Address, BTreeMap<U256, U256>>>,
 ) -> PevmResult<C>
 where
     <S as Storage>::Error: Debug,
@@ -468,6 +468,7 @@ where
             .map(|to| hash_determinisitic(MemoryLocation::Basic(*to)));
         match evm.transact() {
             Ok(result_and_state) => {
+                let mut write_set: BTreeMap<Address, BTreeMap<U256, U256>> = Default::default();
                 for (address, account) in &result_and_state.state {
                     let mut storage_set: BTreeMap<U256, U256> = Default::default();
                     let mut count = 0;
@@ -476,7 +477,7 @@ where
                         count = count + 1;
                     }
                     if (count > 0) {
-                        write_sets.insert(*address, storage_set);
+                        write_set.insert(*address, storage_set);
                     }
                 }
                 evm.db_mut().commit(result_and_state.state.clone());
@@ -487,7 +488,7 @@ where
                 cumulative_gas_used = cumulative_gas_used
                     .saturating_add(execution_result.receipt.cumulative_gas_used);
                 execution_result.receipt.cumulative_gas_used = cumulative_gas_used;
-
+                write_sets.insert(tx_idx, write_set);
                 results.push(execution_result);
                 tx_idx = tx_idx + 1;
             }
