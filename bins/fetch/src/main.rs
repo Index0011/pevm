@@ -54,7 +54,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         )
     })?;
     let storage = RpcStorage::new(provider, spec_id, BlockId::number(block.header.number - 1));
-    let mut write_sets: BTreeMap<Address, BTreeMap<U256, U256>> = Default::default();
+    let mut write_sets: BTreeMap<i32, BTreeMap<Address, BTreeMap<U256, U256>>> = Default::default();
     // Execute the block and track the pre-state in the RPC storage.
     Pevm::default()
         .execute(
