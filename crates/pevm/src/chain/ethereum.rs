@@ -78,8 +78,8 @@ impl PevmChain for PevmEthereum {
     // TODO: Better error handling & properly test this.
     // TODO: Only Ethereum Mainnet is supported at the moment.
     fn get_block_spec(&self, header: &Header) -> Result<SpecId, Self::BlockSpecError> {
-        Ok(SpecId::BERLIN)
-	/*Ok(if header.timestamp >= 1710338135 {
+        Ok(SpecId::SHANGHAI)
+        /*Ok(if header.timestamp >= 1710338135 {
             SpecId::CANCUN
         } else if header.timestamp >= 1681338455 {
             SpecId::SHANGHAI

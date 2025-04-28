@@ -97,14 +97,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
     };
     bytecodes.extend(storage.get_cache_bytecodes());*/
     for (address, mut account) in storage.get_cache_accounts() {
-        /*if let Some(code) = account.code.clone() {
+        if let Some(code) = account.code.clone() {
             let code_hash = account
                 .code_hash
                 .ok_or(format!("Failed to get code hash for: {}", address))?;
             assert_ne!(code_hash, KECCAK_EMPTY);
             //bytecodes.insert(code_hash.clone(), code);
-        account.code = storage.code_by_hash(&code_hash)?;
-        }*/
+            account.code = storage.code_by_hash(&code_hash)?;
+        }
         state.insert(address, account);
     }
 
